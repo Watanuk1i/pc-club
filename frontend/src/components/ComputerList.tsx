@@ -24,10 +24,16 @@ import {
   Computer as ComputerIcon,
   Tv as TvIcon,
   ExpandMore as ExpandMoreIcon,
-  Settings as SettingsIcon
+  Settings as SettingsIcon,
+  CheckCircle as CheckCircleIcon,
+  Error as ErrorIcon,
+  Timer as TimerIcon
 } from '@mui/icons-material';
 import { mockComputers, getComputersByZone, getStatusColor, getStatusText, Computer } from '../mocks/computersMock';
 import useTelegram from '../hooks/useTelegram';
+import LoadingState from './common/LoadingState';
+import CardWithHover from './common/CardWithHover';
+import { ComputerStatus } from '../types/computer';
 
 interface BookingDialogProps {
   open: boolean;
@@ -55,7 +61,7 @@ const SpecsDialog: React.FC<SpecsDialogProps> = ({ open, computer, onClose }) =>
     }
   }, [open, onClose, tg]);
 
-  if (!computer?.specs) return null;
+  if (!computer) return null;
 
   return (
     <Dialog open={open} onClose={onClose} fullScreen={!!tg}>
@@ -63,20 +69,11 @@ const SpecsDialog: React.FC<SpecsDialogProps> = ({ open, computer, onClose }) =>
       <DialogContent>
         <Stack spacing={1}>
           <Typography variant="body1">
-            <strong>CPU:</strong> {computer.specs.cpu}
-          </Typography>
-          <Typography variant="body1">
-            <strong>GPU:</strong> {computer.specs.gpu}
-          </Typography>
-          <Typography variant="body1">
-            <strong>RAM:</strong> {computer.specs.ram}
-          </Typography>
-          <Typography variant="body1">
-            <strong>Монитор:</strong> {computer.specs.monitor}
+            {computer.specs}
           </Typography>
           <Divider />
           <Typography variant="body1">
-            <strong>Стоимость:</strong> {computer.price} руб/час
+            <strong>Стоимость:</strong> {computer.price_per_hour} руб/час
           </Typography>
         </Stack>
       </DialogContent>
@@ -92,11 +89,12 @@ const SpecsDialog: React.FC<SpecsDialogProps> = ({ open, computer, onClose }) =>
 const BookingDialog: React.FC<BookingDialogProps> = ({ open, computer, onClose, onBook }) => {
   const [hours, setHours] = useState(1);
   const { tg } = useTelegram();
+  const totalCost = computer ? hours * computer.price_per_hour : 0;
 
   useEffect(() => {
     if (open && computer && tg) {
       const mainButton = tg.MainButton;
-      mainButton.text = `Забронировать за ${computer.price * hours} руб`;
+      mainButton.text = `Забронировать за ${totalCost} руб`;
       mainButton.show();
       mainButton.onClick(() => {
         onBook(hours);
@@ -110,7 +108,7 @@ const BookingDialog: React.FC<BookingDialogProps> = ({ open, computer, onClose, 
       tg?.BackButton.hide();
       tg?.BackButton.offClick(onClose);
     }
-  }, [open, hours, computer, onClose, onBook, tg]);
+  }, [open, hours, computer, onClose, onBook, tg, totalCost]);
 
   const handleBook = () => {
     onBook(hours);
@@ -131,11 +129,9 @@ const BookingDialog: React.FC<BookingDialogProps> = ({ open, computer, onClose, 
           onChange={(e) => setHours(Math.max(1, parseInt(e.target.value) || 1))}
           inputProps={{ min: 1 }}
         />
-        {computer && (
-          <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>
-            Стоимость: {computer.price * hours} руб.
-          </Typography>
-        )}
+        <Typography variant="subtitle1" sx={{ mt: 2 }}>
+          Стоимость: {totalCost}₽
+        </Typography>
       </DialogContent>
       {!tg && (
         <DialogActions>
@@ -154,12 +150,21 @@ const ComputerCard: React.FC<{
   onBook: (computer: Computer) => void;
   onShowSpecs: (computer: Computer) => void;
 }> = ({ computer, onBook, onShowSpecs }) => {
+  const getStatusIcon = (status: ComputerStatus) => {
+    switch (status) {
+      case 'available': return <CheckCircleIcon />;
+      case 'occupied': return <TimerIcon />;
+      case 'maintenance': return <ErrorIcon />;
+      default: return <ComputerIcon />;
+    }
+  };
+
   return (
     <Card variant="outlined">
       <CardContent sx={{ pb: 1 }}>
         <Box display="flex" alignItems="center" justifyContent="space-between">
           <Box display="flex" alignItems="center">
-            {computer.type === 'pc' ? <ComputerIcon sx={{ mr: 1 }} /> : <TvIcon sx={{ mr: 1 }} />}
+            <ComputerIcon sx={{ mr: 1 }} />
             <Typography variant="body1" component="div">
               {computer.name}
             </Typography>
@@ -171,11 +176,12 @@ const ComputerCard: React.FC<{
         <Box display="flex" alignItems="center" justifyContent="space-between" mt={1}>
           <Chip
             size="small"
+            icon={getStatusIcon(computer.status)}
             label={getStatusText(computer.status)}
-            color={getStatusColor(computer.status) as any}
+            color={getStatusColor(computer.status)}
           />
           <Typography variant="body2" color="text.secondary">
-            {computer.price} ₽/час
+            {computer.price_per_hour} ₽/час
           </Typography>
         </Box>
       </CardContent>
@@ -183,7 +189,7 @@ const ComputerCard: React.FC<{
         <Button
           size="small"
           color="primary"
-          disabled={computer.status !== 'free'}
+          disabled={computer.status !== 'available'}
           onClick={() => onBook(computer)}
           fullWidth
         >
@@ -195,6 +201,9 @@ const ComputerCard: React.FC<{
 };
 
 const ComputerList: React.FC = () => {
+  const [computers, setComputers] = useState<Computer[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [selectedComputer, setSelectedComputer] = useState<Computer | null>(null);
   const [bookingDialogOpen, setBookingDialogOpen] = useState(false);
   const [specsDialogOpen, setSpecsDialogOpen] = useState(false);
@@ -204,7 +213,23 @@ const ComputerList: React.FC = () => {
   useEffect(() => {
     tg?.ready();
     tg?.expand();
+    fetchComputers();
   }, [tg]);
+
+  const fetchComputers = async () => {
+    try {
+      const response = await fetch('/api/computers');
+      if (!response.ok) {
+        throw new Error('Не удалось загрузить список компьютеров');
+      }
+      const data = await response.json();
+      setComputers(data);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Произошла ошибка');
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const handleBookClick = (computer: Computer) => {
     setSelectedComputer(computer);
@@ -218,66 +243,60 @@ const ComputerList: React.FC = () => {
 
   const handleBookingSubmit = async (hours: number) => {
     if (!selectedComputer) return;
-    
-    const bookingData = {
-      computerId: selectedComputer.id,
-      hours: hours,
-      totalPrice: selectedComputer.price * hours,
-      userId: tg?.initDataUnsafe?.user?.id
-    };
 
-    // Отправляем данные в Telegram
-    tg?.sendData(JSON.stringify(bookingData));
-    
-    // Здесь также можно отправить данные на ваш сервер
-    console.log('Бронирование:', bookingData);
+    try {
+      const response = await fetch('/api/bookings', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          computer_id: selectedComputer.id,
+          hours: hours
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error('Не удалось создать бронирование');
+      }
+
+      setBookingDialogOpen(false);
+      fetchComputers();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Произошла ошибка при бронировании');
+    }
   };
 
   return (
-    <Box sx={{ mt: 2, mb: 4 }}>
-      {Array.from(zones.entries()).map(([zoneName, bootcamps]) => (
-        <Accordion key={zoneName} defaultExpanded={zoneName === 'VIP'}>
-          <AccordionSummary expandIcon={<ExpandMoreIcon />}>
-            <Typography variant="h6">{zoneName}</Typography>
-          </AccordionSummary>
-          <AccordionDetails>
-            {Array.from(bootcamps.entries()).map(([bootcampNum, computers]) => (
-              <Box key={bootcampNum ?? 'main'} mb={bootcampNum ? 2 : 0}>
-                {bootcampNum && (
-                  <Typography variant="subtitle1" gutterBottom>
-                    Буткемп {bootcampNum}
-                  </Typography>
-                )}
-                <Grid container spacing={1}>
-                  {computers.map((computer) => (
-                    <Grid item xs={6} sm={4} md={3} lg={2} key={computer.id}>
-                      <ComputerCard 
-                        computer={computer} 
-                        onBook={handleBookClick}
-                        onShowSpecs={handleShowSpecs}
-                      />
-                    </Grid>
-                  ))}
-                </Grid>
-              </Box>
-            ))}
-          </AccordionDetails>
-        </Accordion>
-      ))}
-
+    <LoadingState loading={loading} error={error}>
+      <Box sx={{ p: 3 }}>
+        <Typography variant="h4" gutterBottom>
+          Доступные компьютеры
+        </Typography>
+        <Grid container spacing={3}>
+          {computers.map((computer) => (
+            <Grid item xs={12} sm={6} md={4} key={computer.id}>
+              <ComputerCard
+                computer={computer}
+                onBook={handleBookClick}
+                onShowSpecs={handleShowSpecs}
+              />
+            </Grid>
+          ))}
+        </Grid>
+      </Box>
       <BookingDialog
-        open={bookingDialogOpen}
         computer={selectedComputer}
+        open={bookingDialogOpen}
         onClose={() => setBookingDialogOpen(false)}
         onBook={handleBookingSubmit}
       />
-
       <SpecsDialog
         open={specsDialogOpen}
         computer={selectedComputer}
         onClose={() => setSpecsDialogOpen(false)}
       />
-    </Box>
+    </LoadingState>
   );
 };
 
